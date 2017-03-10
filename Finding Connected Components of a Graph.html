@@ -1,0 +1,393 @@
+<html><head>
+<meta http-equiv="content-type" content="text/html; charset=windows-1252">
+<title>Finding Connected Components of a Graph</title></head>
+
+<body>
+<h1 clear="ALL" align="CENTER">
+Connected Components of a Graph<br></h1>
+<center><big><i>Implementation in <a href="http://www.gmd.de/SCAI/lab/adaptor/adaptor_home.html">Adaptor</a> <a href="http://www.crpc.rice.edu/HPFF/home.html">High Performance Fortran</a><br></i></big></center>
+<center><big><a href="http://computation.pa.msu.edu/">Aleksandar Donev</a>, working under Dr. <a href="http://www.pa.msu.edu/%7Eduxbury">Phil Duxbury</a></big></center>
+
+<a name="Algorithm"></a><h2>Algorithm Description</h2>
+<a name="Formulation"></a><h3>Problem Formulation</h3>
+
+A graph <i><tt>G</tt></i><tt>=(<i>N</i>, <i>E</i>)</tt> can be thought of as a collection of points (here-after nodes) <tt><i>N</i>={<i>i</i>, <i>i</i>=1..<i>n</i>}</tt>, where <tt><i>n</i>=|<i>N</i>|</tt> is the number of nodes, connected via directed or undirected links (arcs), <tt><i>E</i>={<i>e<sub>(i, j)</sub></i> for some <i>i</i> and <i>j</i> in <i>N</i>}</tt>, where <tt><i>m</i>=|<i>E</i>|</tt> is the number of arcs in the graph and <tt><i>e<sub>(i, j)</sub></i></tt> denotes an arc whose head is <tt><i>i</i></tt> and tail is <tt><i>j</i></tt>. We can this represent a graph efficiently by specifying <i><tt>n</tt></i> and <tt><i>m</i></tt> and giving an array <code>HT(m,2)</code> giving the heads and tails of each arc:<br>
+<pre>	<code>HT(<i>e<sub>(i, j)</sub></i>, :)=[<i>i</i>, <i>j</i>]</code>
+</pre> 
+For example, assume that we have randomly generated the following graph:<br>
+
+<a name="Distribution"></a><h3>Distribution of the graph</h3>
+
+We will use coloring to denote ownership of the data on certain 
+processors. The example from figure 1 was executed on 3 processors and 
+was a 2D grid of size <tt>7x7</tt> with 70% of the arcs present. <em>Processors <tt>P1-P3</tt> will have red, green and blue color correspondingly, and the color of each node/arc will denote the processor that is its owner</em>. Once again, here is the graph that I will use as an example throughout this section:<br clear="RIGHT"><br>
+
+<pre>[hpf@gauss hpf-2DNet]$ mpirun -np 3 Test2D-Debug.x $SLIB
+ Enter the length L and the dilution:
+ 7,.7
+ Enter the number of multiplications and connected components labelings:
+ 0,1
+<i># Here are node_lbound and node_ubound for different processors:</i>
+ The distribution of nodes among processors is:
+   Procs:    1   2   3
+   From :    1  18  35
+   To   :   17  34  49
+ Initial connectivity parenthood: 
+</pre>
+
+<a name="f5"></a><center> <img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/Initial.gif" alt="The initial graph connectivity and distribution" align="MIDDLE">
+</center>
+<center><strong>Fig 5.</strong> <i>Initial labeling of the graph</i></center><br>
+
+<em>The connected components labeling algorithm consists of assigning each node <tt><i>i</i></tt> a label <tt><i>c</i>(<i>i</i>)</tt> such that two nodes have the same label if and only if there is a path in the graph connecting the two nodes</em>.
+  Our purpose at the end will be to select only for those arcs and nodes
+ that belong to a selected (usually the one containing the source or 
+sink in network optimization problems) connected component. 
+Mathematically, we want to extract a single (large) connected component <tt>C</tt> from the diluted graph:
+<pre><i>G</i> &lt;-- ({<i>e<sub>(i, j)</sub></i>, c(<i>i</i>)=c(<i>j</i>)=C}, {<i>i</i>, c(<i>i</i>)=C})
+</pre>
+For our specific example, the program will produce the output:
+
+<center><img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/FinalGraph.gif" alt="Final extracted largest connected component" align="MIDDLE">
+</center>
+<center><strong>Fig 2.</strong> <i>Final extracted largest connected component</i></center><br>
+
+<a name="PRAM"></a><h3>Parallel PRAM Algorithms for Connected-Components Labeling</h3>
+
+The algorithms build the labeling of the graph by building a <em>spanning forest</em> of the graph. Namely, each connected component will be represented via a <em>tree</em> in the forest, with one node chosen as the root of the tree. To convert this spanning forest into a proper labeling, we simply <em>collapse all the trees into stars</em>---trees of height 1. See figure 3 for an illustration. 
+
+<center> <img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/TreeCollapse.gif" alt="Tree collapse transforms trees into stars" align="MIDDLE">
+</center>
+<center><strong>Fig 3.</strong> <i>A tree collapses into a star--<code>TreeCollapse()</code></i></center><br>
+
+We represent the trees in the forest in the usuall way, via <em>parenthood relations</em>. So, let us make the array <code>p (<i>n</i>)</code>, which stores the parent of each node, and <code>p (node) = node</code> for root nodes <code>node</code>. Thus tree collapse can be represented via:<br>
+
+<pre>Procedure <b>TreeCollapse</b> (<i>N</i>)
+	For all nodes <i>i</i> in <i>N</i> do in <em>parallel</em>
+            	p (<i>i</i>) &lt;-- FindRoot (<i>i</i>) 
+	End do
+End procedure <b>TreeCollapse</b>
+</pre>
+where we find the root of the tree a node belongs to by traversing the tree upward until a root node is found:
+<pre>Procedure child = <b>FindRoot</b> (<i>i</i>)
+	child = <i>i</i>		
+	<i># Concurrent read:</i>
+	Do while ( p (child) != child )	child &lt;-- p (child)                
+End procedure <b>FindRoot</b>
+</pre>
+Finding the root <code>FindRoot (node)</code> has a cost  <tt><i>O</i>(<i>H</i>)</tt> , where <i><tt>H</tt></i> is the depth of <code>node</code> in the tree. Therefore, it is beneficial to have trees of small height (i.e. almost stars).<br>
+Now, let us assume that two trees need to be merged together into a bigger tree because there is an arc <tt><i>e<sub>(i, j)</sub></i></tt> connecting one of the nodes <tt><i>i</i></tt> from the first tree to another node <i><tt>j</tt></i>
+ in the second tree. This can be done easily by hooking one of the roots
+ to any node in the other tree. Again, to save on cost and minimize the 
+height of the parenthood trees, it is best to hook one of the roots to 
+the other root. See figure 4 for an illustration. 
+ 
+<center> <img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/Hooking.gif" alt="Two trees merge together" align="MIDDLE">
+</center>
+<center><strong>Fig 4.</strong> <i>Hooking two trees together--<code>MergeTrees(<i>e</i><sub>(4, 9)</sub>)</code></i></center><br>
+
+There are various ways to minimize the height of the trees formed by 
+tree merging. The simplest one to understand (though not most memory 
+efficient) is to always hook a shorter tree to a taller tree (this 
+gurantees that no tree will have height larger than <tt>ln<sub>2</sub>(<i>n</i>)</tt>). For this purpose we make another array, <code>h (n)</code>, and store in it the <em>height</em> of the tree <em>underneath</em>
+ a given node (so leaf nodes in the tree have minimal height 0, while 
+roots have the maximal height label). When a shorter tree merges with a 
+bigger tree the heights of the two trees do not change. When two trees 
+of equal height merge, the taller tree gets higher by 1 unit. <br>
+So we have the following tree merging procedure:<br>
+
+<pre>Procedure <b>MergeTrees</b> (<i>e<sub>(i, j)</sub></i>)
+	r{<i>i</i>} = FindRoot (<i>i</i>)
+	r{<i>j</i>} = FindRoot (<i>j</i>)
+	<i># Find the taller tree and make it a parent of the shorter child:</i>
+	If ( h (r{<i>i</i>}) &gt; h (r{<i>j</i>}) ) then 
+		parent &lt;-- r{<i>i</i>}  ;  child &lt;-- r{<i>j</i>}		
+	Else if ( h (r{<i>i</i>}) &lt; h (r{<i>j</i>}) ) then
+		parent &lt;-- r{<i>j</i>}  ;  child &lt;-- r{<i>i</i>}
+	Else
+		<i># In case of a tie, we can chose the smaller label to be the parent:</i>
+		parent &lt;-- min (<i>i</i>, <i>j</i>)  ;  child &lt;-- max (<i>i</i>, <i>j</i>)
+		<i># Concurrent read and write:</i>
+		h (parent) &lt;-- h (parent) + 1		
+	End if
+	<i># Now merge the trees (concurrent write):</i>
+	p (child) &lt;-- parent               
+End procedure <b>MergeTrees</b>
+</pre>
+To shorten the trees in the spanning forest one can periodically perform
+ pointer jumping, which simply means that we rehook a node higher up in 
+its parenthood tree:
+<pre>Procedure <b>PointerJumping</b> (<i>N</i>) 	
+	For all nodes <i>i</i> in <i>N</i> do in <em>parallel</em>	
+		<i>Concurrent read and write:</i>
+		p (<i>i</i>) &lt;-- p (p (<i>i</i>))                
+	End do
+End procedure <b>PointerJumping</b>
+</pre> 
+
+Edge condensation is a process of passing arcs higher up the parenthood 
+tree, useful when some of the nodes become inactive and their arcs need 
+to be passed to other nodes:
+
+<pre>Procedure <b>EdgeCondensation</b> (<i>E</i>)	
+	For all arcs <i>e<sub>(i, j)</sub></i> in <i>E</i> do in <em>parallel</em>	
+		<i>Concurrent read:</i>
+		<i>e<sub>(i, j)</sub></i> &lt;-- <i>e</i><sub>(p<i> (i), </i>p<i> (j))</i></sub>               
+	End do
+End procedure <b>EdgeCondensation</b>
+</pre>
+
+Now we can summarize an efficient parallel algorithm for computing the 
+connected components of a graph in parallel that accepts a graph <i><tt>G</tt></i><tt>=(<i>N</i>, <i>E</i>)</tt> as input:
+
+<pre>Procedure <b>BuildConnectedComponents</b> (<i>G</i>)
+	<i># Initially let each node be its own parent and mark all arcs as alive:</i>
+	For all nodes <i>i</i> in <i>N</i> do in <em>parallel</em>
+		p (<i>i</i>) &lt;-- <i>i</i>
+	Mark all arcs as alive
+	Mark all nodes as non-leaf
+	Repeat until there are no alive arcs
+		For all alive arcs <i>e<sub>(i, j)</sub></i> in <i>E</i> do in <em>parallel</em>
+			If <i>certain conditions</i> are true
+				Merge the trees of nodes <i>i</i> and <i>j</i>
+				Kill arc <i>e<sub>(i,j)</sub></i>
+			End if
+		End for
+		Optionally
+			Mark leaf nodes and condense their arcs			
+			Perform pointer jumping on non-leaf nodes
+			and / or
+			Condense the alive arcs 
+			and / or 
+			Remove duplicate alive arcs
+		End optionally
+	End repeat
+	TreeCollapse () <i># Not neccessary if invoked above</i>
+End procedure <b>BuildConnectedComponents</b>
+</pre>
+
+The main step in any algorithm is <code>MergeTrees</code>. If executed 
+for all arcs, it will guarantee a correct connected component labeling 
+so long as trees are merged acyclically (acyclicity of the parenthood 
+relations is required in any tree). This can be guaranteed by using some
+ acyclic property when choosing which tree merges with which, such as 
+comparing the heights of the two trees or comparing the values of the 
+labels of the roots of the two trees.<br clear="RIGHT"><br>
+There are two main approaches to the above algorithm. 
+<ol type="I">
+<li>
+In the first approach, if there are no additional <tt><i>certain conditions</i></tt>
+ imposed on the merging, then all arcs will be used and killed in the 
+first iteration. However, this requires traversing the trees to find 
+their roots, which is a logarithmic operation <tt><i>O (</i>ln<i> (n))</i></tt>. The total running time of such an approach is <tt><i>O (m </i>ln<sub>2</sub> <i>(n))</i></tt>. 
+</li><li>List Item Two
+In the second approach, trees are not always merged. The most popular 
+choice is to only merge stars to other trees, or merging only stars and 
+performing full tree collapse on each iteration so that all trees are 
+either isolated vertices or stars. In this approach, each iteration in 
+to the <code>Repeat</code> loop is of cost <tt><i>O (m)</i></tt>, but then there are likely to be  <tt><i>O (</i>ln<i> (n))</i></tt>
+ iterations until all arcs are dead. So the cost is still a logarithmic 
+factor worse than the best serial algorithms for sparse graphs--<tt><i>O (n)</i></tt>.
+</li></ol>
+
+We will employ the first approach because of its simplicity:
+
+<pre>Procedure <b>BuildConnectedComponents-PRAM</b> (<i>G</i>)
+	<i># Initially let each node be its own parent:</i>
+	For all nodes <i>i</i> in <i>N</i> do in <em>parallel</em>
+		p (<i>i</i>) &lt;-- <i>i</i>
+	For all arcs <i>e<sub>(i, j)</sub></i> in <i>E</i> do in <em>parallel</em>
+		MergeTrees (<i>e<sub>(i, j)</sub></i>)
+		Optionally perform some kind of pointer jumping on <i>i</i> and <i>j</i>
+	End for
+	TreeCollapse ()
+End procedure <b>BuildConnectedComponents-PRAM</b>
+</pre>
+In the initial implementation we will not use pointer jumping. This is 
+because the height property of trees can not be maintained under such 
+operations and a <tt><i>O (m </i>ln<sub>2</sub> <i>(n))</i></tt> bound can not be guaranteed for some pathological graphs.
+
+<a name="Distributed"></a><h3>A Simple Distributed Relaxation Connected-Components Algorithm</h3>
+
+The above algorithm were well suited for PRAM CRCW (Parallel Random 
+Access Memory with Concurrent Read and Concurrent Write capability)  
+models. This model can not be directly implemented even on most of 
+todays SMP's, because of the concurrent read &amp; write capability.
+HPF is not a suitable language for implementing such runtime 
+communication and/or job distribution irregularities. So we need to look
+ at another distributed-memory connected-component labeling algorithm.<br>
+The simplest kind of algorithm is a <em>relaxation algorithm</em> known as <em>local diffusion</em> [<a href="#4">4</a>]. Instead of the previous parenthood label <code>p (node)</code> we will use the label <code>c (node)</code>
+ just to indicate that there are no parenthood trees being created but a
+ labeling of the nodes is built right away.  The algorithm can be 
+expressed a few lines:
+<pre>Procedure <b>BuildConnectedComponents-LocalDiffusion</b> (<i>G</i>) 
+	<i># Initially let each node be its own parent:</i>
+	For all nodes <i>i</i> in <i>N</i> do in <em>parallel</em>
+		p (<i>i</i>) &lt;-- <i>i</i><i>
+	# Local diffusion relaxation:</i>
+	Repeat until convergence to a stationary point
+		For all nodes <i>i</i> in <i>N</i> do in <em>parallel</em>	
+			c (<i>i</i>) &lt;-- min (c (<i>i</i>), { c (<i>j</i>) for all <i>e <sub>(i, j)</sub></i> in <i>E</i>} )
+		End for
+	End repeat
+End procedure <b>BuildConnectedComponents-LocalDiffusion</b>
+</pre>
+In words, set the label of each node to the minimum of its own label and
+ all of its neighbouring nodes, and iterate until convergence to a 
+stationary labeling of the nodes. 
+We can easily implement the above algorithm using the heads &amp; tails 
+arrays and avoiding the use of a temporary by speeding up the 
+relaxation:
+
+<pre>Procedure <b>BuildConnectedComponents-Relax</b> (<i>G</i>) 
+	For all nodes <i>i</i> in <i>N</i> do in <em>parallel</em>
+		p (<i>i</i>) &lt;-- <i>i</i>
+	Repeat until convergence to a stationary point
+		<i># Relaxation step:</i>
+		For all arcs <i>e<sub>(i, j)</sub></i> in <i>E</i> do in <em>parallel</em>
+			c (<i>i</i>), c (<i>j</i>) &lt;-- min ( c (<i>i</i>), c (<i>j</i>) )
+		End for
+	End repeat
+End procedure <b>BuildConnectedComponents-Relax</b>
+</pre>
+The relaxation step has to be repeated as many times as the (chemical) 
+length of the biggest percolation cluster in the network, which can be 
+of the order of the size of the system [<a href="#4">4</a>]. So this algorithm is not very efficient. Figure 5 shows the absolute magnitude of the label mismatch <tt><i>M</i></tt> across all arcs during the course of the relaxation for two points, one above, one at, and one below the percolation point:<br>
+<pre><i># Total mismatch over all arcs:</i>
+M &lt;-- Sum of |c (<i>i</i>) - c (<i>j</i>)| over all arcs <i>e<sub>(i, j)</sub></i>
+</pre> 
+
+<center> <img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/LocalDiffusion.gif" alt="Convergence behaviour of the local diffusion relaxation algorithm" align="MIDDLE">
+</center>
+<center><strong>Fig 4.</strong> <i>Convergence behaviour of the local diffusion relaxation algorithm<br>
+The grid graph was 2D of size [ 1000 x 1000 ]</i></center><br>
+
+<a name="Combined"></a><h3>A Mixed Approach</h3>
+The optimal distributed-memory connected-components algorithm on most machines will consist of two phases:
+<ul>
+<li> <strong>Local Phase</strong>--in which each processor performs a 
+local connected-components algorithm on the arcs and nodes that it owns.
+ Note that this phase needs to ignore <a href="#RemoteEdges">remote arcs</a>. Different algorithms can be used for this local phase. From an algorithmic point of view, it is best to use one of the <i>O (n)</i>
+ algorithms, like breath (depth)-first search. We decided to use the 
+above parallel PRAM arc-based algorithms for the local phase, though:
+
+<pre><i># Some statistics about the trees built in the local phase:</i>
+ The maximum tree height is:  2
+ The average tree height is:  0.20
+ The number of tree-climbing steps is:  54
+<i># Here are the parent nodes (with .TRUE. mask at the end):</i>
+  Parent nodes and their ownership:
+   Nodes:    1   8  14  21  22  28  35  36  37 
+   Procs:    1   1   1   2   2   2   3   3   3 
+After the local phase the connectivity is:
+</pre>
+<a name="f6"></a><center> <img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/Local.gif" alt="Labeling of the graph after the local phase" align="MIDDLE">
+</center>
+<center><strong>Fig 6.</strong> <i>Labeling of the graph after the local phase</i></center><br>
+
+</li><li> <strong>Global Phase</strong>--in which only remote arcs are involved and a global connected-components algorithm is invoked on a <em>reduced graph</em> consisting of only remote-arcs. <br>
+Before entering the global connected-components algorithm, we need to 
+collapse all the remote arcs, that is, make their head &amp; tail 
+pointers point to the parents of their head &amp; tail. This will 
+dramatically reduce the number of nodes involved in the global phase:
+
+<pre><i># After packing, the ends_remote array and its ownership is:</i>
+ The remote arcs belong to processor:
+   Procs:    1   1   1   1   1   2   2   2   2   2   3   3   3   3   3 
+ Before the collapse the remote arcs have:
+   Heads:   19  21  22  23  18  24  35  36  37  32  38  33  39  40  41
+   Tails:   12  14  15  16  17  17  28  29  30  31  31  32  32  33  34
+<i># Now, we collapse the remote edges to get a reduced graph with many duplicate edges:</i>
+ The collapsed remote arcs have:
+   Heads:   22  21  22  22  22  22  35  36  37  22  37  22  37  37  37
+   Tails:    8  14   8   8   8   8  28  22  22  22  22  22  22  22  22
+<i># Here is how that graph looks like (this is an added drawing):</i>
+</pre>
+
+<a name="f7"></a><center> <img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/ReducedDuplicate.gif" alt="The reduced graph with duplicate edges" align="MIDDLE">
+</center>
+<center><strong>Fig 7.</strong> <i>The reduced graph with duplicate edges</i></center><br>
+
+It might be beneficial to remove duplicate remote arc entries as well to
+ reduce the number of inner iterations in the global 
+connected-components algorithm. This is costly to do because it requires
+ a global sorting.<br>
+But, <em>most duplicate arc entries will reside on one or two neighbouring processors</em>. This is because remote arcs are close physically in the network and thus close index-wise in the array <code>ends</code>.
+  So, all we need to do is remove remote arc entries locally on each 
+processor. In most cases this will leave two or one copies of each 
+remote arc in the reduced graph. 
+
+<pre><i># After removing the local duplicate arc copies:</i>P
+ The non-duplicate remote arcs have:
+   Heads:  --   21 --  --   22  22  35  36  37 --  --  --  --  --   37 
+   Tails:  --   14 --  --    8   8  28  22  22 --  --  --  --  --   22 
+ There are  15  remote arcs, out of  60
+ There are  7  arcs entering the global phase
+
+<i># And here is the reduced graph that will enter the global phase in the next section:</i>
+</pre>
+
+<a name="f8"></a><center> <img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/Reduced.gif" alt="The reduced graph without local duplicate edges" align="MIDDLE">
+</center>
+<center><strong>Fig 8.</strong> <i>The reduced graph without local duplicate edges</i></center><br>
+
+We will use the local-diffusion algorithm for this global phase 
+operating on the reduced graph, because of its efficient HPF 
+implementation in Adaptor and simplicity. Implementation details will 
+come later on. After this phase completes, the reduced graph will be 
+correctly labeled:
+
+<pre> 
+ There are  7  arcs entering the global phase
+ The HALO collapsed global arcs have:
+   Heads:   19  20  21  36  37  38  37
+   Tails:   14   8   8  28  22  22  51
+ Now at iteration:  1  with total mismatch  86
+ Now at iteration:  2  with total mismatch  42
+ Now at iteration:  3  with total mismatch  0
+ Total number of global iterations:  3
+ After the global relaxation phase the node labels are:
+</pre>
+
+<a name="f9"></a><center> <img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/ReducedFinal.gif" alt="The reduced graph after the global phase" align="MIDDLE">
+</center>
+<center><strong>Fig 9.</strong> <i>The reduced graph after the global phase</i></center><br>
+
+The labeling of the graph at this stage reflects the changes in the labels of the parents that participated in the global phase:
+
+<a name="f10"></a><center> <img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/Global.gif" alt="The graph labeling after the global phase" align="MIDDLE">
+</center>
+<center><strong>Fig 10.</strong> <i>The graph labeling after the global phase</i></center><br>
+
+After the global algorithm is done, all non-parent nodes need to update 
+their labels from their parent nodes to complete the global labeling 
+phase:
+
+<a name="f11"></a><center><img src="Finding%20Connected%20Components%20of%20a%20Graph_ficheiros/Final.gif" alt="The graph labeling after the global update" align="MIDDLE">
+</center>
+<center><strong>Fig 11.</strong> <i>The graph labeling after the global update</i></center><br>
+
+</li></ul>
+In summary, here is the full distributed connected-components algorithm:
+<pre>Procedure <b>BuildConnectedComponents-Distributed</b> (<i>G</i>)
+	<i># Select the non-remote arcs (P<sub><i>i</i></sub> is the processor owning node <i>i</i>)</i>
+	<i>E<sup>(l)</sup></i> &lt;-- {<i>e<sub>(i, j)</sub></i> | (P<sub>i</sub> = P<sub>j</sub>)} 	
+	<i># Local phase:</i>	
+	BuildConnectedComponents-PRAM(<i>G<sup>(l)</sup></i>=(<i>E<sup>(l)</sup></i>, <i>N</i>))
+	<i># Mark the nodes that are not parents (in TreeCollapse()):</i>
+	<i>N<sup>(np)</sup></i> &lt;-- {<i>i</i> | p (<i>i</i>) != <i>i</i>} 
+	<i># Select only the remote arcs:</i>
+	<i>E<sup>(g)</sup></i> &lt;-- <i>E</i> \ <i>E<sup>(l)</sup></i> 
+	<i># Condense the remote arcs:</i>
+	EdgeCondensation (<i>E<sup>(g)</sup></i>)
+	Remove duplicate entries from (<i>E<sup>(g)</sup></i>)
+	<i># Global phase</i>
+	BuildConnectedComponents-Relax ({<i>G<sup>(g)</sup></i>=(<i>E<sup>(g)</sup></i>, <i>N</i>))
+	<i># Update of global labels:</i>
+	PointerJumping (<i>N<sup>(np)</sup></i>)
+End procedure <b>BuildConnectedComponents-Distributed</b>
+</pre>
+
+
+
+</body></html>
